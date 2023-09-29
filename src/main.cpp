@@ -1,17 +1,40 @@
 
+#include <Arduino.h>
+#include <Wire.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
-
+#include <Adafruit_MCP4725.h>
+//Pin Definitions
+// Display Pins:
+//  defined in User_Setup.h
+//  TFT_MOSI 23
+//  TFT_SCLK 18
+//  TFT_CS 3(not used)
+//  TFT_DC 16
+//  TFT_RST 4
+//  TFT_BL not used
+const int CS_PINS[2] = {19, 17};
+//  TFT Chip Select pins 19,17
+// DAC Pins:
+//  I2C SCL 22 -> DACs
+//  I2C SDA 21 -> DACs
+// Pulse Out Pins
+int pulsePins[6] = {12, 13, 12, 13, 12, 13};
 #define P1_OUT_PIN 12
 #define P2_OUT_PIN 13
-#define ENCODER2_A_PIN 32
-#define ENCODER2_B_PIN 33
-#define ENCODER1_A_PIN 25
-#define ENCODER1_B_PIN 26
-#define ENCODER2_SW_PIN 27
-#define ENCODER1_SW_PIN 14
+//#define P3_OUT_PIN
+//Encoder Pins
+#define ENCODER2_A_PIN 32 //36
+#define ENCODER2_B_PIN 33 //39
+#define ENCODER1_A_PIN 25 //34
+#define ENCODER1_B_PIN 26 //35
+//Encoder Switch Pins
+#define ENCODER2_SW_PIN 27 //32
+#define ENCODER1_SW_PIN 14 //33
 
-byte middleFontSize = 7;
+
+
+byte middleFontSize = 6;
 byte bottomFontSize = 1;
 
 void loop0(void * parameter);
@@ -32,11 +55,19 @@ void selectDisplay(int screen);
 void deselectDisplay(int screen);
 void checkButtons();
 void drawNumber(int side, int number);
+void checkEncoders();
+void generateFakeClocks();
+void sendPulse(int destination);
+void checkPulseEnds();
+uint16_t noteNumber(uint16_t aValue);
+void drawNote(int side, int note);
+
 
 TaskHandle_t Task0;
 TaskHandle_t Task1;
 
 TFT_eSPI tft = TFT_eSPI();
+Adafruit_MCP4725 dac; // creates an instance of the DAC
 static portMUX_TYPE spinlock = portMUX_INITIALIZER_UNLOCKED;
 
 
@@ -61,16 +92,24 @@ static volatile unsigned long lastButton1Press = 0;
 static volatile unsigned long lastButton2Press = 0;
 static volatile int buttonDebounce = 250;
 
-static volatile uint32_t ringSteps[2][3]{ 0xF555555F, 0xFFFFFFFF, 0xFFFFFFFF, // 32 bit int stores steps on/off
+static volatile uint32_t ringSteps[2][3] = { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, // 32 bit int stores steps on/off
                           0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
-                          
+static volatile uint16_t ringValues[2][3][32] = {
+  2,5,6,4,5,6,7,8, 9,10,11,12,13,14,15,16, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
+};                         
+static volatile int ringPulseDest[2][3] = {0,1,1,1,1,1};                          
 int counter = 0;
 int ringRadii[4] = {119,98,77,56};
 int ringColors[2][3] = {
-  TFT_BLUE, TFT_LIGHTGREY , TFT_BLUE,
+  TFT_BLUE, TFT_BLUE, TFT_BLUE,
   TFT_BLUE, TFT_BLUE, TFT_BLUE
   };
-const int CS_PINS[2] = {19, 17};
+
 
 unsigned long lastClock1In = 0;
 unsigned long lastClock2In = 0;
@@ -80,32 +119,28 @@ unsigned long lastClock5In = 0;
 unsigned long lastClock6In = 0;  
 unsigned long lastPulse1Sent = 0;
 unsigned long lastPulse2Sent = 0;
+unsigned long lastClockIn[2][3] = {0,0,0,0,0,0};
+unsigned long lastPulseSent[6] = {0,0,0,0,0,0}; 
+int lastCounter1 = 1;
+int lastCounter2 = 1;
+uint16_t lastNote = 0;
 bool clock1In = false;
 
 void setup() {
   // put your setup code here, to run once:
-
+  for (int r = 0; r<16; r++)
+  {
+    ringValues[0][0][r] = random(0,4096);
+  }
   Serial.begin(115200);
   Serial.println("Setup started.");
+  dac.begin(0x60);
+  dac.setVoltage( 0, false);
 
 
-    xTaskCreatePinnedToCore(
-      loop0, /* Function to implement the task */
-      "Task0", /* Name of the task */
-      20000, /* Stack size in words */
-      NULL, /* Task input parameter */
-      0, /* Priority of the task */
-      &Task0, /* Task handle. */
-      0); /* Core where the task should run */
-
-  xTaskCreatePinnedToCore(
-      loop1, /* Function to implement the task */
-      "Task1", /* Name of the task */
-      20000, /* Stack size in words */
-      NULL, /* Task input parameter */
-      0, /* Priority of the task */
-      &Task1, /* Task handle. */
-      1); /* Core where the task should run */
+  xTaskCreatePinnedToCore(loop0, "Task0", 20000, NULL, 0, &Task0, 0); 
+  xTaskCreatePinnedToCore(loop1, "Task1", 20000, NULL, 0, &Task1, 1); 
+  
   pinMode(ENCODER1_A_PIN, INPUT_PULLUP);
   pinMode(ENCODER1_B_PIN, INPUT_PULLUP);
   pinMode(ENCODER1_SW_PIN, INPUT_PULLUP);
@@ -130,103 +165,90 @@ void loop0(void * parameter) {
   attachInterrupt(digitalPinToInterrupt(ENCODER2_B_PIN), read_encoder2, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENCODER1_SW_PIN), read_button1, FALLING);
   attachInterrupt(digitalPinToInterrupt(ENCODER2_SW_PIN), read_button2, FALLING);
- 
-
-  int lastCounter1 = 1;
-  int lastCounter2 = 1;
-  char str[20];
-
   for (;;) 
   {
-    
-    vTaskDelay(1);
-
-
-    if (encoder1Change){
-      portENTER_CRITICAL_ISR(&spinlock); 
-      encoder1Change = false;
-      portEXIT_CRITICAL_ISR(&spinlock);
-      if(encoder1Counter > lastCounter1) {
-        currEditStep++;
-        if (currEditStep > ringDivisions[currEditSide][currEditRing]-1) currEditStep = 0;
-      }
-      if(encoder1Counter < lastCounter1) {
-        currEditStep--;
-        if (currEditStep < 0) currEditStep = ringDivisions[currEditSide][currEditRing]-1;
-      }
-      lastCounter1 = encoder1Counter;
-    }
-    if (encoder2Change){
-      portENTER_CRITICAL_ISR(&spinlock); 
-      encoder2Change = false;
-      portEXIT_CRITICAL_ISR(&spinlock);
-      if(encoder2Counter < lastCounter2) {
-        currEditRing++;
-        if (currEditRing > 2) currEditRing = 0;
-      }
-      if(encoder2Counter > lastCounter2) {
-        currEditRing--;
-        if (currEditRing < 0) currEditRing = 2;
-      }
-      currEditStep = 0;
-      lastCounter2 = encoder2Counter;
-      Serial.println(currEditRing);
-    }
-    if ((millis()-lastClock1In)>100)
-    {
-      
-      lastClock1In = millis();
-      stepPosition[0][0]++;
-      if(stepPosition[0][0] == ringDivisions[0][0]) stepPosition[0][0]=0;
-      if(stepRead(0,0,stepPosition[0][0])) sendPulse1();
-    }
-    if ((millis()-lastClock2In)>400)
-    {
-      sendPulse2();
-      lastClock2In = millis();
-      stepPosition[1][0]++;
-      if(stepPosition[1][0] == ringDivisions[1][0]) stepPosition[1][0]=0;
-    }
-    if ((millis()-lastClock3In)>200)
-    {
-      
-      lastClock3In = millis();
-      stepPosition[0][1]++;
-      if(stepPosition[0][1] == ringDivisions[0][1]) stepPosition[0][1]=0;
-    }
-    if ((millis()-lastClock4In)>500)
-    {
-      
-      lastClock4In = millis();
-      stepPosition[1][1]++;
-      if(stepPosition[1][1] == ringDivisions[1][1]) stepPosition[1][1]=0;
-    }
-    if ((millis()-lastClock5In)>300)
-    {
-      
-      lastClock5In = millis();
-      stepPosition[0][2]++;
-      if(stepPosition[0][2] == ringDivisions[0][2]) stepPosition[0][2]=0;
-    }
-    if ((millis()-lastClock6In)>600)
-    {
-      
-      lastClock6In = millis();
-      stepPosition[1][2]++;
-      if(stepPosition[1][2] == ringDivisions[1][2]) stepPosition[1][2]=0;
-    } 
-    if ((millis()-lastPulse1Sent)>10)
-    {
-      digitalWrite(2,LOW);
-      digitalWrite(P1_OUT_PIN, HIGH);
-    }
-    if ((millis()-lastPulse2Sent)>10)
-    {
-      
-      digitalWrite(P2_OUT_PIN, HIGH);
-    }    
+    //vTaskDelay(1);
+    checkEncoders();
+    generateFakeClocks();
+    checkPulseEnds();
   }
 }
+void checkPulseEnds()
+{
+  for (int pulseDest = 0; pulseDest<5; pulseDest++)
+  {
+    if ((millis() - lastPulseSent[pulseDest])>10)
+    { 
+      if (pulseDest==0) digitalWrite(2,LOW);
+      digitalWrite(pulsePins[pulseDest], HIGH);
+    }
+  }
+}
+void generateFakeClocks()
+{
+  int clockLengths[2][3] = {500,200,300,
+                            400,500,600};
+                           
+  for (int side = 0; side<2; side++)
+  {
+    for (int ring = 0; ring<3; ring++)
+    {
+      if ((millis()-lastClockIn[side][ring]) > clockLengths[side][ring])
+      {
+        if ((side==0)&&(ring==0)) {
+          dac.setVoltage(ringValues[0][0][stepPosition[0][0]],false);
+          //Serial.println(ringValues[0][0][stepPosition[0][0]]);
+        }
+
+        lastClockIn[side][ring]=millis();
+        stepPosition[side][ring]++;
+        if(stepPosition[side][ring] == ringDivisions[side][ring]) stepPosition[side][ring]=0;
+        if(stepRead(side,ring,stepPosition[side][ring])) sendPulse(ringPulseDest[side][ring]);
+      }
+    }
+  }
+}
+void sendPulse(int destination)
+{
+  
+  lastPulseSent[destination] = millis();
+  if (destination == 0) digitalWrite(2,HIGH);
+  digitalWrite(pulsePins[destination], LOW);
+}
+void checkEncoders()
+{
+  if (encoder1Change){
+    portENTER_CRITICAL_ISR(&spinlock); 
+    encoder1Change = false;
+    portEXIT_CRITICAL_ISR(&spinlock);
+    if(encoder1Counter > lastCounter1) {
+      currEditStep++;
+      if (currEditStep > ringDivisions[currEditSide][currEditRing]-1) currEditStep = 0;
+    }
+    if(encoder1Counter < lastCounter1) {
+      currEditStep--;
+      if (currEditStep < 0) currEditStep = ringDivisions[currEditSide][currEditRing]-1;
+    }
+    lastCounter1 = encoder1Counter;
+  }
+  if (encoder2Change){
+    portENTER_CRITICAL_ISR(&spinlock); 
+    encoder2Change = false;
+    portEXIT_CRITICAL_ISR(&spinlock);
+    if(encoder2Counter < lastCounter2) {
+      currEditRing++;
+      if (currEditRing > 2) currEditRing = 0;
+    }
+    if(encoder2Counter > lastCounter2) {
+      currEditRing--;
+      if (currEditRing < 0) currEditRing = 2;
+    }
+    currEditStep = 0;
+    lastCounter2 = encoder2Counter;
+  }
+
+}
+
 void sendPulse1()
 {
   digitalWrite(2,HIGH);
@@ -257,7 +279,7 @@ void loop1(void * parameter) {
   selectDisplay(1);
   tft.fillScreen(TFT_BLACK);
   deselectDisplay(1);
-  drawNumber(currEditSide, currEditStep+1); 
+  //drawNumber(currEditSide, currEditStep+1); 
   for (;;)
   { 
     //sprintf(newstr, "Task H, Core %i\r\n", xPortGetCoreID());
@@ -274,7 +296,7 @@ void loop1(void * parameter) {
       lastCurrEditStep = currEditStep;
       lastCurrEditSide = currEditSide;
       lastCurrEditRing = currEditRing;
-      drawNumber(currEditSide, currEditStep+1);        
+      //drawNumber(currEditSide, currEditStep+1);        
     }
     for (int side=0; side<2; side++){
       for (int ring=0; ring<3; ring++){
@@ -284,13 +306,22 @@ void loop1(void * parameter) {
           else drawSegment(side,ring,lastStepPosition[side][ring], TFT_BLACK);    
           lastStepPosition[side][ring] = stepPosition[side][ring];
           //int c = random(0x10000);
-          drawSegment(side,ring,stepPosition[side][ring], TFT_WHITE);    
+          drawSegment(side,ring,stepPosition[side][ring], TFT_WHITE);
+          if (noteNumber(ringValues[0][0][stepPosition[0][0]])!=lastNote)
+          {
+            lastNote = noteNumber(ringValues[0][0][stepPosition[0][0]]);
+            drawNote(0,(lastNote%12));
+          }    
         }
       }
     }
     drawEditCursor(currEditSide, currEditRing, currEditStep);
  
   }
+}
+uint16_t noteNumber(uint16_t aValue)
+{
+  return (aValue/68); 
 }
 void drawSegment(int side, int ring, int segNum, uint16_t aColor){
   
@@ -454,11 +485,64 @@ void drawEditCursor(int side, int ring, int segNum){
   deselectDisplay(side);
 } 
 void drawNumber(int side, int number){
+  
   String aString = String(number);
   selectDisplay(side);
   tft.drawArc(120,120, 58, 0, 0, 360, TFT_BLACK, TFT_BLACK, true);
   tft.setTextColor(TFT_WHITE);
   tft.setTextDatum(ML_DATUM);
+  int a_width = tft.textWidth(aString, middleFontSize);
+  tft.drawString(aString, 120-(a_width/2), 120, 7);
+  deselectDisplay(side);
+}
+void drawNote(int side, int note)
+{
+  Serial.println(note);
+  String aString = "##";
+  switch(note) 
+  {
+    case(0):
+      aString = String('C');
+      break;
+    case(1):
+      aString = String('C#');
+      break;
+    case(2):
+      aString = "D";
+      break;
+    case(3):
+      aString = "D#";
+      break;
+    case(4):
+      aString = "E";
+      break;
+    case(5):
+      aString = "F";
+      break;
+    case(6):
+      aString = "F#";
+      break;
+    case(7):
+      aString = "G";
+      break;
+    case(8):
+      aString = "G#";
+      break;
+    case(9):
+      aString = "A";
+      break;
+    case(10):
+      aString = "A#";
+      break;
+    case(11):
+      aString = "B";
+      break;
+  }
+  Serial.println(aString);
+  selectDisplay(side);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextDatum(ML_DATUM);
+  //aString = String(12);
   int a_width = tft.textWidth(aString, middleFontSize);
   tft.drawString(aString, 120-(a_width/2), 120, 7);
   deselectDisplay(side);
