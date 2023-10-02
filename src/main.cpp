@@ -87,13 +87,14 @@ static volatile uint16_t ringDivisions[2][3] = {
 };
 static volatile int button1Value = 0;
 static volatile int button2Value = 0;
+bool pulseSent[6] = {false, false, false, false, false, false};
 
 static volatile unsigned long lastButton1Press = 0;
 static volatile unsigned long lastButton2Press = 0;
 static volatile int buttonDebounce = 250;
 
-static volatile uint32_t ringSteps[2][3] = { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, // 32 bit int stores steps on/off
-                          0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
+static volatile uint32_t ringSteps[2][3] = { 0xFFFFFFFF, 0x0, 0x0, // 32 bit int stores steps on/off
+                          0x0, 0x0, 0x0};
 static volatile uint16_t ringValues[2][3][32] = {
   2,5,6,4,5,6,7,8, 9,10,11,12,13,14,15,16, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
   0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
@@ -102,7 +103,8 @@ static volatile uint16_t ringValues[2][3][32] = {
   0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
   0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0
 };                         
-static volatile int ringPulseDest[2][3] = {0,1,1,1,1,1};                          
+static volatile int ringPulseDest[2][3] = { 0,1,1,
+                                            1,1,1};                          
 int counter = 0;
 int ringRadii[4] = {119,98,77,56};
 int ringColors[2][3] = {
@@ -126,8 +128,17 @@ int lastCounter2 = 1;
 uint16_t lastNote = 0;
 bool clock1In = false;
 
+float numNotes = 60.0; // 48.0 for 4.096v DAC -- 60.0 for 5.00v DAC
+float topVolt = 5.00; 
+float actualVoltageAtDAC = 5.06;// Adjust this to your voltage at the DAC. Do not go lower than 4.0 or 5.0
+float dacInterval = (((topVolt / actualVoltageAtDAC) * 4095.0) / numNotes);
+
+uint32_t dac_notes[65]; // holds the calculated values for the DAC
+
 void setup() {
-  // put your setup code here, to run once:
+  
+  for (int x = 0; x < numNotes+2; x++) dac_notes[x] = round(x * dacInterval);
+
   for (int r = 0; r<16; r++)
   {
     ringValues[0][0][r] = random(0,4096);
@@ -177,8 +188,9 @@ void checkPulseEnds()
 {
   for (int pulseDest = 0; pulseDest<5; pulseDest++)
   {
-    if ((millis() - lastPulseSent[pulseDest])>10)
+    if ( (pulseSent[pulseDest]) && ((millis() - lastPulseSent[pulseDest])>10) )
     { 
+      pulseSent[pulseDest] = false;
       if (pulseDest==0) digitalWrite(2,LOW);
       digitalWrite(pulsePins[pulseDest], HIGH);
     }
@@ -186,7 +198,7 @@ void checkPulseEnds()
 }
 void generateFakeClocks()
 {
-  int clockLengths[2][3] = {500,200,300,
+  int clockLengths[2][3] = {150,200,300,
                             400,500,600};
                            
   for (int side = 0; side<2; side++)
@@ -195,15 +207,17 @@ void generateFakeClocks()
     {
       if ((millis()-lastClockIn[side][ring]) > clockLengths[side][ring])
       {
-        if ((side==0)&&(ring==0)) {
-          dac.setVoltage(ringValues[0][0][stepPosition[0][0]],false);
-          //Serial.println(ringValues[0][0][stepPosition[0][0]]);
-        }
+        
 
         lastClockIn[side][ring]=millis();
         stepPosition[side][ring]++;
         if(stepPosition[side][ring] == ringDivisions[side][ring]) stepPosition[side][ring]=0;
         if(stepRead(side,ring,stepPosition[side][ring])) sendPulse(ringPulseDest[side][ring]);
+        if ((side==0)&&(ring==0)) {
+          uint16_t q_note = map(ringValues[0][0][stepPosition[0][0]],0,4096,0,61);
+          dac.setVoltage(dac_notes[q_note],false);
+          Serial.println(ringValues[0][0][stepPosition[0][0]]);
+        }        
       }
     }
   }
@@ -212,8 +226,11 @@ void sendPulse(int destination)
 {
   
   lastPulseSent[destination] = millis();
+  pulseSent[destination] = true;
   if (destination == 0) digitalWrite(2,HIGH);
   digitalWrite(pulsePins[destination], LOW);
+  Serial.print("Pulse Sent:");
+  Serial.println(destination);
 }
 void checkEncoders()
 {
@@ -310,7 +327,8 @@ void loop1(void * parameter) {
           if (noteNumber(ringValues[0][0][stepPosition[0][0]])!=lastNote)
           {
             lastNote = noteNumber(ringValues[0][0][stepPosition[0][0]]);
-            drawNote(0,(lastNote%12));
+            //drawNote(0,(lastNote%12));
+            drawNumber(0,lastNote);
           }    
         }
       }
