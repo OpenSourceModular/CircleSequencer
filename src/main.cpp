@@ -32,8 +32,24 @@ int pulsePins[6] = {12, 13, 12, 13, 12, 13};
 #define ENCODER2_SW_PIN 27 //32
 #define ENCODER1_SW_PIN 14 //33
 
+//Menu stuff
+#define MENU_STEPS 0
+#define MENU_NOTES 1
+#define MENU_SIDE 1
+#define MENU_RING 1
 
+#define MODE_STEPSELECT 0
+#define MODE_NOTECHANGE 1
+#define MODE_RINGCHANGE 2
+#define MODE_SIDECHANGE 3
+#define MODE_STEPSELECTED 4
+int leftMode = MODE_NOTECHANGE;
+bool editNote = false; //in note edit mode do we change current note or select new step?
 
+String menuStrings[10] = {"STEPS", "NOTES","SIDE","RING","OTHER","OTHER","OTHER","OTHER","OTHER","OTHER"};
+int currMenuItem = 0;
+int lastMenuItem = 1;
+int numMenuItems = 10;
 byte middleFontSize = 6;
 byte bottomFontSize = 1;
 
@@ -61,6 +77,8 @@ void sendPulse(int destination);
 void checkPulseEnds();
 uint16_t noteNumber(uint16_t aValue);
 void drawNote(int side, int note);
+void drawAllRings();
+void drawMenu(int side, String menuString);
 
 
 TaskHandle_t Task0;
@@ -93,8 +111,8 @@ static volatile unsigned long lastButton1Press = 0;
 static volatile unsigned long lastButton2Press = 0;
 static volatile int buttonDebounce = 250;
 
-static volatile uint32_t ringSteps[2][3] = { 0xFFFFFFFF, 0x0, 0x0, // 32 bit int stores steps on/off
-                          0x0, 0x0, 0x0};
+static volatile uint32_t ringSteps[2][3] = { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, // 32 bit int stores steps on/off
+                          0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
 static volatile uint16_t ringValues[2][3][32] = {
   2,5,6,4,5,6,7,8, 9,10,11,12,13,14,15,16, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
   0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
@@ -216,7 +234,7 @@ void generateFakeClocks()
         if ((side==0)&&(ring==0)) {
           uint16_t q_note = map(ringValues[0][0][stepPosition[0][0]],0,4096,0,61);
           dac.setVoltage(dac_notes[q_note],false);
-          Serial.println(ringValues[0][0][stepPosition[0][0]]);
+          //Serial.println(ringValues[0][0][stepPosition[0][0]]);
         }        
       }
     }
@@ -229,8 +247,8 @@ void sendPulse(int destination)
   pulseSent[destination] = true;
   if (destination == 0) digitalWrite(2,HIGH);
   digitalWrite(pulsePins[destination], LOW);
-  Serial.print("Pulse Sent:");
-  Serial.println(destination);
+  //Serial.print("Pulse Sent:");
+  //Serial.println(destination);
 }
 void checkEncoders()
 {
@@ -238,29 +256,30 @@ void checkEncoders()
     portENTER_CRITICAL_ISR(&spinlock); 
     encoder1Change = false;
     portEXIT_CRITICAL_ISR(&spinlock);
-    if(encoder1Counter > lastCounter1) {
-      currEditStep++;
-      if (currEditStep > ringDivisions[currEditSide][currEditRing]-1) currEditStep = 0;
+    if((leftMode==MODE_STEPSELECT)||(leftMode==MODE_NOTECHANGE && !editNote)){
+      if(encoder1Counter > lastCounter1) {
+        currEditStep++;
+        if (currEditStep > ringDivisions[currEditSide][currEditRing]-1) currEditStep = 0;
+      }
+      if(encoder1Counter < lastCounter1) {
+        currEditStep--;
+        if (currEditStep < 0) currEditStep = ringDivisions[currEditSide][currEditRing]-1;
+      }
+      lastCounter1 = encoder1Counter;
     }
-    if(encoder1Counter < lastCounter1) {
-      currEditStep--;
-      if (currEditStep < 0) currEditStep = ringDivisions[currEditSide][currEditRing]-1;
-    }
-    lastCounter1 = encoder1Counter;
   }
   if (encoder2Change){
     portENTER_CRITICAL_ISR(&spinlock); 
     encoder2Change = false;
     portEXIT_CRITICAL_ISR(&spinlock);
     if(encoder2Counter < lastCounter2) {
-      currEditRing++;
-      if (currEditRing > 2) currEditRing = 0;
+      currMenuItem++;
+      if (currMenuItem > numMenuItems-1) currMenuItem = 0;
     }
     if(encoder2Counter > lastCounter2) {
-      currEditRing--;
-      if (currEditRing < 0) currEditRing = 2;
+      currMenuItem--;
+      if (currMenuItem < 0) currMenuItem = numMenuItems-1;
     }
-    currEditStep = 0;
     lastCounter2 = encoder2Counter;
   }
 
@@ -296,6 +315,7 @@ void loop1(void * parameter) {
   selectDisplay(1);
   tft.fillScreen(TFT_BLACK);
   deselectDisplay(1);
+  drawAllRings();
   //drawNumber(currEditSide, currEditStep+1); 
   for (;;)
   { 
@@ -328,11 +348,18 @@ void loop1(void * parameter) {
           {
             lastNote = noteNumber(ringValues[0][0][stepPosition[0][0]]);
             //drawNote(0,(lastNote%12));
-            drawNumber(0,lastNote);
+            //drawNumber(0,lastNote);
+
+
           }    
         }
       }
     }
+    if (currMenuItem != lastMenuItem)
+    {
+      lastMenuItem = currMenuItem;
+      drawMenu(1,menuStrings[currMenuItem]);
+    }    
     drawEditCursor(currEditSide, currEditRing, currEditStep);
  
   }
@@ -340,6 +367,20 @@ void loop1(void * parameter) {
 uint16_t noteNumber(uint16_t aValue)
 {
   return (aValue/68); 
+}
+void drawAllRings()
+{
+  for (int q=0; q<2; q++){
+    for (int w = 0; w<3; w++){
+      for (int e = 0; e<ringDivisions[q][w]; e++){
+        //Serial.println(stepRead(q,w,e));
+        if(stepRead(q,w,e))
+          drawSegment(q, w, e, ringColors[q][w]);    
+        else 
+          drawSegment(q,w,e, TFT_BLACK); 
+      }
+    }
+  }
 }
 void drawSegment(int side, int ring, int segNum, uint16_t aColor){
   
@@ -502,6 +543,13 @@ void drawEditCursor(int side, int ring, int segNum){
   tft.drawArc(120,120, ringRadii[ring]-4, ringRadii[ring]-13, round(startAngle), endAngle, TFT_RED, TFT_RED, true); 
   deselectDisplay(side);
 } 
+void drawMenu(int side, String menuString)
+{
+  selectDisplay(side);
+  tft.drawArc(120,120, 58, 0, 0, 360, TFT_BLACK, TFT_BLACK, true); 
+  tft.drawString(menuString, 80, 120, 4); 
+  deselectDisplay(side);
+}
 void drawNumber(int side, int number){
   
   String aString = String(number);
@@ -580,16 +628,29 @@ void checkButtons(){
   if (button1Value) 
   {
     Serial.println("BUTTON1");
-    if(stepRead(currEditSide,currEditRing,currEditStep)) // if the step is set
-    { 
-      stepClear(currEditSide,currEditRing,currEditStep);   // clear it
-      drawSegment(currEditSide, currEditRing, currEditStep, TFT_BLACK);
+    switch(leftMode) {
+      case(MODE_STEPSELECT):
+      {
+        if(stepRead(currEditSide,currEditRing,currEditStep)) // if the step is set
+        { 
+          stepClear(currEditSide,currEditRing,currEditStep);   // clear it
+          drawSegment(currEditSide, currEditRing, currEditStep, TFT_BLACK);
+        }
+        else // the step isn't set, so set it
+        {
+          stepSet(currEditSide,currEditRing,currEditStep);
+          drawSegment(currEditSide, currEditRing, currEditStep, ringColors[currEditSide][currEditRing]);
+        }
+      break;
+      }
+      case(MODE_NOTECHANGE):
+      {
+        editNote = !editNote;
+        drawNumber(currEditSide,ringValues[currEditSide][currEditRing][currEditStep]);
+        break;
+      }
     }
-    else // the step isn't set, so set it
-    {
-      stepSet(currEditSide,currEditRing,currEditStep);
-      drawSegment(currEditSide, currEditRing, currEditStep, ringColors[currEditSide][currEditRing]);
-    }
+
     portENTER_CRITICAL_ISR(&spinlock);
     button1Value = 0;
     portEXIT_CRITICAL_ISR(&spinlock);
